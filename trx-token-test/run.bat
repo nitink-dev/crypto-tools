@@ -1,0 +1,9 @@
+@echo off
+echo Installing dependencies...
+npm install
+npm install --save-dev @chainlink/contracts
+echo Compiling...
+npx hardhat compile
+echo Deploying...
+node scripts\deploy.cjs
+pause

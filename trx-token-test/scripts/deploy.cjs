@@ -1,8 +1,7 @@
-// scripts/deploy.cjs
+// scripts/deploy.cjs (corrected)
 require("dotenv").config();
 const TronWeb = require("tronweb");
 const fs = require("fs");
-const solc = require("solc");
 const path = require("path");
 
 async function main() {
@@ -18,7 +17,9 @@ async function main() {
 
   const tronWeb = new TronWeb({
     fullHost: fullNode,
-    privateKey: privateKey,
+    solidityNode,
+    eventServer,
+    privateKey,
   });
 
   // ✅ Connection check
@@ -26,48 +27,37 @@ async function main() {
   console.log("✅ Connected to Shasta Testnet");
   console.log("Deployer address:", address);
 
-  // ✅ Compile contract
-  console.log("🛠️ Compiling contract...");
-  const contractPath = path.join(__dirname, "..", "contracts", "FlashUSDT_tron.sol");
-  const source = fs.readFileSync(contractPath, "utf8");
+  // ✅ Load compiled artifact (from Hardhat)
+  console.log("🛠️ Loading compiled contract...");
+  const artifactPath = path.join(__dirname, "..", "artifacts", "contracts", "TestToken.sol", "TestToken.json");
+  const artifact = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+  const abi = artifact.abi;
+  const bytecode = artifact.bytecode;
 
-  const input = {
-    language: "Solidity",
-    sources: { "FlashUSDT_tron.sol": { content: source } },
-    settings: { outputSelection: { "*": { "*": ["abi", "evm.bytecode"] } } }
-  };
-
-  const output = JSON.parse(solc.compile(JSON.stringify(input)));
-
-  if (output.errors) {
-    for (const e of output.errors) {
-      console.error(e.formattedMessage || e);
-    }
-    const hasError = output.errors.some(e => e.severity === "error");
-    if (hasError) process.exit(1);
-  }
-
-  const contractName = Object.keys(output.contracts["FlashUSDT_tron.sol"])[0];
-  const abi = output.contracts["FlashUSDT_tron.sol"][contractName].abi;
-  const bytecode = output.contracts["FlashUSDT_tron.sol"][contractName].evm.bytecode.object;
+  // Constructor parameters (customize as needed)
+  const parameters = [
+    "Test Token",  // _name
+    "TTK",         // _symbol
+    18,            // _decimals
+    "TBcCSYgSTMQccxgoR7Ct6hTsCm5qdErRyf"  // _priceFeed (Tron mainnet ETH/USD; won't update on Shasta)
+  ];
 
   console.log("🚀 Deploying contract to Shasta...");
 
   try {
-    // ✅ Create transaction
+    // ✅ Create transaction with parameters
     const tx = await tronWeb.transactionBuilder.createSmartContract(
       {
         abi,
         bytecode,
-        feeLimit: 1_000_000_000, // 1000 TRX max energy fee
+        parameters,  // ABI-encodes args automatically
+        feeLimit: 1_000_000_000,  // 1000 TRX max
       },
       address
     );
 
-    // ✅ Sign transaction
-    const signedTxn = await tronWeb.trx.sign(tx, privateKey);
-
-    // ✅ Broadcast transaction
+    // ✅ Sign and broadcast
+    const signedTxn = await tronWeb.trx.sign(tx);
     const receipt = await tronWeb.trx.sendRawTransaction(signedTxn);
 
     if (!receipt.result) {
@@ -76,31 +66,34 @@ async function main() {
     }
 
     console.log("✅ Deployment broadcasted!");
-    console.log("📄 Transaction ID:", receipt.txid);
+    console.log("📄 Transaction ID:", receipt.transaction.txID);  // Tron uses txID
 
-    // ✅ Wait for contract confirmation
+    // ✅ Wait for confirmation (Tron blocks ~3s)
     console.log("⏳ Waiting for contract confirmation...");
-    await new Promise(r => setTimeout(r, 10000));
-
-    const txInfo = await tronWeb.trx.getTransactionInfo(receipt.txid);
-    const contractAddress = txInfo?.contract_address;
+    let contractAddress;
+    for (let i = 0; i < 10; i++) {  // Retry up to 30s
+      await new Promise(r => setTimeout(r, 3000));
+      const txInfo = await tronWeb.trx.getTransactionInfo(receipt.transaction.txID);
+      contractAddress = txInfo?.contract_address;
+      if (contractAddress) break;
+    }
 
     if (!contractAddress) {
-      console.error("⚠️ Contract address not found yet. Try again after a few seconds.");
-      console.error("Check TX:", `https://shasta.tronscan.org/#/transaction/${receipt.txid}`);
+      console.error("⚠️ Contract address not found. Check TX:");
+      console.error(`https://shasta.tronscan.org/#/transaction/${receipt.transaction.txID}`);
       process.exit(1);
     }
 
     console.log("✅ Contract deployed successfully!");
-    console.log("📜 Contract Address:", contractAddress);
+    console.log("📜 Contract Address:", tronWeb.address.fromHex(contractAddress));  // Convert to base58
     console.log("🔗 View on Shasta Explorer:");
-    console.log(`   https://shasta.tronscan.org/#/contract/${contractAddress}`);
+    console.log(`https://shasta.tronscan.org/#/contract/${tronWeb.address.fromHex(contractAddress)}`);
 
     // ✅ Save ABI
     const buildDir = path.join(__dirname, "..", "build");
     fs.mkdirSync(buildDir, { recursive: true });
-    fs.writeFileSync(path.join(buildDir, "FlashUSDT_tron.abi.json"), JSON.stringify(abi, null, 2));
-    console.log("💾 ABI saved to ./build/FlashUSDT_tron.abi.json");
+    fs.writeFileSync(path.join(buildDir, "TestToken.abi.json"), JSON.stringify(abi, null, 2));
+    console.log("💾 ABI saved to ./build/TestToken.abi.json");
 
   } catch (error) {
     console.error("❌ Deployment failed:", error.message || error);
